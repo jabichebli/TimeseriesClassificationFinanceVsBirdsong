@@ -18,7 +18,6 @@ You can explore the full classification analysis [here](https://jabichebli.githu
   - `covariate1`  
   - `covariate2`  
   - `type` (binary class: financial vs birdsong)  
-- Source: Modified version of data from [tsfeatures package](http://pkg.robjhyndman.com/tsfeatures/)
 
 ## Objectives  
 - Visually and statistically assess feature separability between financial and birdsong time series  
@@ -35,8 +34,6 @@ You can explore the full classification analysis [here](https://jabichebli.githu
   - Accuracy on training and test sets  
 - Justify model choice and reflect on what features distinguish financial time series from birdsong recordings
 
-## Project Brief  
-[Brief](https://github.com/jabichebli/TimeseriesClassificationFinanceVsBirdsong/blob/main/Classification_Project_Brief.pdf)
 
 ## Key Methods  
 - Data Splitting: Stratified split into training and test sets  
@@ -51,7 +48,7 @@ You can explore the full classification analysis [here](https://jabichebli.githu
   - Summary of differences between the two time series types  
 
 ## Files  
->[TimeseriesClassificationFinanceVsBirdsong.qmd](TimeseriesClassificationFinanceVsBirdsong.qmd) — Quarto file containing full classification analysis and comparisons  
+>[TimeseriesClassificationFinanceVsBirdsong.qmd](FinanceBirdsClassification.qmd) — Quarto file containing full classification analysis and comparisons  
 >[index.html](index.html) — Rendered output for easy viewing  
 >[finance_and_birds.csv](finance_and_birds.csv) — Feature dataset derived from financial time series and birdsong recordings
 
