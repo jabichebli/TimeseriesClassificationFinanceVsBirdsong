@@ -1,0 +1,1960 @@
+---
+title: "Fincance vs Bird Time Series Classification Models"
+author: "Jason Abi Chebli"
+date: "2024-04-12"
+quarto-required: ">=1.3.0"
+format:
+    html:
+        output-file: FinanceBirdsClassification.html
+        css: "assignment.css"
+        embed-resources: true
+editor: 
+  markdown: 
+    wrap: 72
+---
+
+```{r load-packages, include = FALSE}
+# Load all the necessary packages for this assignment
+library(boot)
+library(crosstalk)
+library(detourr)
+library(discrim)
+library(ggpubr)
+library(ggthemes)
+library(GGally)
+library(kableExtra)
+library(knitr)
+library(patchwork)
+library(plotly)
+library(randomForest)
+library(readr)
+library(rpart.plot)
+library(tidymodels)
+library(tidyverse)
+library(tourr)
+library(viridisLite)
+library(xgboost)
+```
+
+#### How well can I build a simple classifier?
+
+##### a)
+
+```{r question-2a, include = FALSE}
+# Read the data in
+financebirds <- read_csv("finance_and_birds.csv")
+
+# ---------------------------------- VISUALLY ----------------------------------
+
+# -------------------------------- Density Plot --------------------------------
+
+# Pivot to long format for easy facet plotting
+financebirds_long <- pivot_longer(financebirds, cols = -type)
+
+density_plot <- ggplot(financebirds_long, aes(x = value, fill = type)) +
+  geom_density(alpha = 0.5) +
+  facet_wrap(~name, scales = "free") +
+  scale_fill_manual(values = c("finance" = "#440154FF", "birdsongs" = "#21908CFF")) +
+  theme_minimal() #+ labs(title = "Figure 1: Density plots by feature and type") + theme(plot.title = element_text(hjust = 0.5))
+
+# --------------- Pairwise Ellipse Plots for Time Series Features --------------- 
+
+# Generate ellipse points for a given dataset (2D), using variance-covariance structure [REFERENCE: https://dicook.github.io/mulgar_book/14-lda.html#exercises]
+gen_xvar_ellipse <- function(x, n = 100, nstd = 1.5) {
+  mu <- colMeans(x)
+  sigma <- cov(x)
+
+  # Generate points on a circle
+  angles <- seq(0, 2 * pi, length.out = n)
+  circle <- cbind(cos(angles), sin(angles))
+
+  # Cholesky decomposition to transform the circle
+  ellipse <- t(nstd * t(circle %*% chol(sigma)) + mu)
+  colnames(ellipse) <- c("x", "y")
+
+  as.data.frame(ellipse)
+}
+
+# The dataset variables
+vars <- c("covariate1", "covariate2", "entropy", "linearity", "x_acf1")
+
+# Define pairs for the plots (excluding duplicates and self-pairs)
+var_pairs <- list(
+  c("covariate1", "covariate2"),
+  c("covariate1", "entropy"),
+  c("covariate1", "linearity"),
+  c("covariate1", "x_acf1"),
+  c("covariate2", "entropy"),
+  c("covariate2", "linearity"),
+  c("covariate2", "x_acf1"),
+  c("entropy", "linearity"),
+  c("entropy", "x_acf1"),
+  c("linearity", "x_acf1")
+)
+
+# Set color palette
+colors <- c("finance" = "#440154FF", "birdsongs" = "#21908CFF")
+
+# Loop through pairs and create plots
+plot_list <- list()
+
+for (i in seq_along(var_pairs)) {
+  pair <- var_pairs[[i]]
+  xvar <- pair[1]
+  yvar <- pair[2]
+
+  # Create subset of data
+  finance_sub <- financebirds |>
+    select(all_of(pair), type) |>
+    rename(x = all_of(xvar), y = all_of(yvar))
+
+  # Generate ellipse data for each type
+  p_ell <- NULL
+  for (t in unique(finance_sub$type)) {
+    x <- finance_sub |> filter(type == t)
+    e <- gen_xvar_ellipse(x[,1:2], n = 150, nstd = 1.5)
+    e$type <- t
+    p_ell <- bind_rows(p_ell, e)
+  }
+
+  # Create ggplot
+  p <- ggplot(p_ell, aes(x = x, y = y, colour = type)) +
+    geom_path() +
+    scale_color_manual(values = colors) +
+    theme_minimal() +
+    labs(
+      title = paste0("(", letters[i], ") ", xvar, " vs ", yvar),
+      x = xvar,
+      y = yvar
+    ) +
+    theme(aspect.ratio = 1) + 
+  theme(plot.title = element_text(hjust = 0.5))
+
+  plot_list[[i]] <- p
+}
+
+
+# -------------------------------- NUMERICALLY ---------------------------------
+# Summarise the data numerically to understand whether and how the two types of time series are distinguishable.
+bird_table <- financebirds |> 
+  filter(type == "birdsongs") |> 
+  summarise(
+    linearity = c(mean = mean(linearity, na.rm = TRUE), sd = sd(linearity, na.rm = TRUE)),
+    entropy = c(mean = mean(entropy, na.rm = TRUE), sd = sd(entropy, na.rm = TRUE)),
+    x_acf1 = c(mean = mean(x_acf1, na.rm = TRUE), sd = sd(x_acf1, na.rm = TRUE)),
+    covariate1 = c(mean = mean(covariate1, na.rm = TRUE), sd = sd(covariate1, na.rm = TRUE)),
+    covariate2 = c(mean = mean(covariate2, na.rm = TRUE), sd = sd(covariate2, na.rm = TRUE))
+  ) |> 
+  as.data.frame() |> 
+  t() |> 
+  as.data.frame() |> 
+  setNames(c("mean", "sd")) |> 
+  rownames_to_column(var = "variable")
+
+finance_table <- financebirds |> 
+  filter(type == "finance") |> 
+  summarise(
+    linearity = c(mean = mean(linearity, na.rm = TRUE), sd = sd(linearity, na.rm = TRUE)),
+    entropy = c(mean = mean(entropy, na.rm = TRUE), sd = sd(entropy, na.rm = TRUE)),
+    x_acf1 = c(mean = mean(x_acf1, na.rm = TRUE), sd = sd(x_acf1, na.rm = TRUE)),
+    covariate1 = c(mean = mean(covariate1, na.rm = TRUE), sd = sd(covariate1, na.rm = TRUE)),
+    covariate2 = c(mean = mean(covariate2, na.rm = TRUE), sd = sd(covariate2, na.rm = TRUE))
+  ) |> 
+  as.data.frame() |> 
+  t() |> 
+  as.data.frame() |> 
+  setNames(c("mean", "sd")) |> 
+  rownames_to_column(var = "variable")
+
+# Join the two tables by the "variable" column
+combined_table <- left_join(bird_table, finance_table, by = "variable", suffix = c(" birdsong", " finance"))
+
+```
+
+The financial time series and audio tracks of birds used in this analysis contains records for
+974 time series, containing the five predictor variables - including
+`linearity`, `entropy`, `x_acf1`, `covariate1` and `covariate2` - which
+are meant to be used to distinguish between financial time series and
+audio tracks of birds, with the true classification being stored in the
+`type` variable - classifying something as "birdsongs" or "finance".
+
+A summary of the mean and standard deviation of the two types of time
+series for the different predictor variables can be seen in Table 2.
+
+::: {.center-div}
+
+[Table 2: Summary Statistics for Birdsong and Finance Time Series]{.figure-title}
+
+::: {.kable-wrapper}
+```{r question-2a-i, echo = FALSE}
+options(digits=3)
+kable(combined_table) |> #, caption = "Table 2: Summary Statistics for Birdsong and Finance Time Series") 
+kable_styling(full_width = FALSE)
+```
+:::
+
+:::
+
+As can be seen in Table 2, in regards to:
+
+-   `linearity`: finance and birdsongs have extremely different means,
+    with financial time series having much higher mean and variance, making `linearity` very strong feature
+    for distinguishing the difference in type.
+-   `entropy`: birdsongs have a higher mean and lower variance than financial time series, resulting
+    in more consistent entropy. Overall, there is a clear difference
+    between the two types mean and standard deviation indicating that `entropy`
+    may be useful.
+-   `x_acf1`: finance and birdsongs have a very strong difference in mean but similar variance,
+    making `x_acf1` a useful feature. (Note that financial time series have a higher
+    autocorrelation on average which makes sense intuitively)
+-   `covariate1`: Almost identical means and standard deviations between finance and birdsongs, making
+    `covariate1` not a useful feature for distinguishing the difference in type.
+-   `covariate2`: finance and birdsongs have a strong difference in mean and similar variance,
+    meaning `covariate2` may be quite informative.
+
+Overall, from this quick numerical analysis, it is looking like:
+`linearity`, `entropy`, `x_acf1` and `covariate2` may be key features in
+distinguishing between the difference in financial time series and audio
+tracks of birds while `covariate1` does *not* seem to be useful in helping
+distinguish the difference.
+
+Figure 1's density plots help visualise the insights that can be seen in
+Table 2.
+
+::: {.center-div}
+[Figure 1: Density Plots by Feature and Type]{.figure-title}
+```{r question-2a-ii, echo=FALSE}
+# Visualise the Density Plots
+density_plot
+```
+:::
+
+Figure 1 illustrates:
+
+-   `covariate1`: birdsongs and finance have a normal distribution with
+    similar mean and variance.
+-   `covariate2`: birdsongs and finance have a normal distribution with
+    similar variance but a different mean.
+-   `entropy`: finance experiences a bimodal distribution while
+    birdsongs experiences a normal distribution, with different variance
+-   `linearity`: birdsongs and finance seem to be normally distributed, however, the mean
+    and variance of birdsongs and finance are extremely different.
+-   `x_acf1`: birdsongs and finance have a bimodal distribution with a
+    slightly different variance and mean.
+
+Overall, the two types of time series are mainly distinguishable through
+`linearity`, `entropy`, `x_acf1` and `covariate2` while extremely not
+distinguishable by `covariate1`. This visual conclusion aligns with the numerical conclusion.
+
+The assumptions for linear discriminant analysis (LDA) include:
+
+-   the distribution of the predictors is a multivariate normal
+-   the same variance-covariance matrix
+
+It is clear from Figure 1 that neither of these conditions were met:
+
+-   the distributions for some of the variables (such as `x_acf1`,
+    `entropy`) are bimodal and not normally distributed
+-   there is a large variance differences, especially in `linearity`.
+
+Consequently, the LDA assumptions do *not* hold.
+
+```{r question-2a-iii, include=FALSE}
+# Visualise the Pairwise Ellipse Plots for Time Series Features 
+# [I removed this from the output as there is too much analysis already, but it is cool to visualise if interested]
+ggarrange(plot_list[[1]], plot_list[[2]], plot_list[[3]], ncol = 3, common.legend = TRUE, legend = "none")  +
+  plot_annotation(title = "Figure 2: Pairwise Ellipse Plots for Time Series Features")
+ggarrange(plot_list[[4]], plot_list[[5]], plot_list[[6]], ncol = 3, common.legend = TRUE, legend = "none")
+ggarrange(plot_list[[7]], plot_list[[8]], plot_list[[9]], ncol = 3, common.legend = TRUE, legend = "none")
+ggarrange(plot_list[[10]], ncol = 3, common.legend = TRUE, legend = "right") 
+
+```
+
+##### b)
+
+The data was broken into a training set and a testing set as seen in the
+code below. The split was 70/30, meaning 70% of the data went to
+training, 30% of the data went to testing, and the split made sure that
+the proportion of birdsongs and finance types are near-equal in both the
+training and testing split.
+
+```{r question-2b, results = "hide"}
+# Break the data into training and test samples, appropriately (70/30 split).
+financebirds_strata <- financebirds |> initial_split(prop = 0.7, strata = type)
+financebirds_train <- training(financebirds_strata)
+financebirds_test <- testing(financebirds_strata)
+```
+
+##### c)
+
+Even though the assumptions do not hold, an LDA and logistic regression
+model was fitted to the training data. Please see the `.qmd` file if you would like to see the code.
+
+```{r question-2c, echo = FALSE}
+# Ensure type is 'factor' in order to perform classification
+financebirds_train <- financebirds_train |> mutate(type = as.factor(type))
+financebirds_test <- financebirds_test |> mutate(type = as.factor(type))
+
+# -------------------- Linear Discriminant Analysis (LDA) --------------------
+
+# Define the LDA model
+lda_spec <- discrim_linear() |>
+  set_mode("classification") |>
+  set_engine("MASS", prior = c(0.3, 0.7))
+
+# Fit the LDA model to the training data
+lda_fit <- lda_spec |>
+  fit(type ~ linearity + entropy + x_acf1 + covariate1 + covariate2, data = financebirds_train)
+
+# --------------------------- Logistic Regression -----------------------------
+
+# Define the Logistic Regression model
+logistic_mod <- logistic_reg() |> 
+  set_engine("glm") |> 
+  set_mode("classification") |> 
+  translate()
+
+# Fit the Logistic Regression model to the training data
+logistic_fit <- logistic_mod |>
+  fit(type ~ linearity + entropy + x_acf1 + covariate1 + covariate2, data = financebirds_train)
+```
+
+##### d) 
+
+[Variable Importance]{.underline}
+
+Regarding the LDA model fit, a summary of the linear discriminant of the
+different features can be seen in Table 3.
+
+::: {.center-div}
+
+[Table 3: LDA Fit Linear Discriminants]{.figure-title}
+
+::: {.kable-wrapper}
+```{r question-2c-i, echo = FALSE}
+
+# View the results of LDA fit
+lda_fit$fit$scaling |> as_tibble(rownames = "Feature") |>
+  kable(digits = 3) |>
+  kable_styling(full_width = FALSE)
+```
+:::
+
+:::
+
+According to Table 3, for the LDA model, `entropy` is the most influential feature,
+followed closely by `covariate2` as the second most influential feature.
+Meanwhile the other features contribute much less and may not improve
+classification much - especially `x_acf1` and and `linearity`.
+
+Regarding the logistic regression model fit, a summary of the logistic
+regression coefficients can be seen in Table 4.
+
+::: {.center-div}
+
+[Table 4: Logistic Regression Fit Coefficients]{.figure-title}
+
+::: {.kable-wrapper}
+```{r question-2c-ii, echo = FALSE}
+# View the results of logistic fit
+tidy(logistic_fit$fit) |> 
+  kable(digits = 3) |>
+  kable_styling(full_width = FALSE)
+```
+:::
+
+:::
+
+We can see from Table 4 that, for the Logistic Regression model, given their quite high p-value (p \>
+0.05), it indicates that `x_acf1` and `covariate1` are not statistically
+significant, meaning that there is strong evidence that they are not
+useful predictors. Meanwhile, `linearity`, `entropy` and `covariate2`,
+with a low p-value, indicate that they are statistically significant -
+meaning that there is strong evidence that they are useful predictors.
+Looking at the coefficient estimates, `entropy` is very strongly negative,
+while `covariate2` is strongly positive and `linearity` is also strongly
+positive.
+
+[Confusion Matrices and Accuracy]{.underline}
+
+The confusion matrix for the LDA model and the Logistic Regression model
+on the test set can be seen in Table 5 and Table 6, respectively.
+
+```{r question-2d, echo = FALSE}
+# ------------------------------------------------------------------------------
+# Make predictions, generate confusion matrices, determine accuracy 
+# ------------------------------------------------------------------------------
+
+# Make predictions using both models
+lda_preds <- predict(lda_fit, new_data = financebirds_test)
+logistic_preds <- predict(logistic_fit, new_data = financebirds_test)
+
+# Combine predictions with true labels
+lda_results <- bind_cols(lda_preds, financebirds_test)
+logistic_results <- bind_cols(logistic_preds, financebirds_test)
+
+# Create a confusion matrix for LDA
+lda_cm <- lda_results |> select(type, .pred_class) |> count(type, .pred_class) |> 
+  group_by(type) |> 
+  mutate(cl_acc = n[.pred_class ==  type]/sum(n)) |> pivot_wider(names_from = .pred_class, values_from = n) |> 
+  select(type, "birdsongs", "finance", cl_acc)
+
+# Create a confusion matrix for Logistic Regression Model
+logistic_cm <- logistic_results |> select(type, .pred_class) |> count(type, .pred_class) |> 
+  group_by(type) |> 
+  mutate(cl_acc = n[.pred_class ==  type]/sum(n)) |> pivot_wider(names_from = .pred_class, values_from = n) |> 
+  select(type, "birdsongs", "finance", cl_acc)
+
+# Augment test set with predicted probabilities and predicted classes (LDA)
+lda_probs <- lda_fit |> 
+  augment(new_data = financebirds_test, type.predict = "prob") |>
+  mutate(.pred_correct = if_else(type == "birdsongs", .pred_birdsongs, .pred_finance),
+         .pred_predicted = if_else(.pred_class == "birdsongs", .pred_birdsongs, .pred_finance))
+
+# Augment test set with predicted probabilities and predicted classes (Logistic)
+logistic_probs <- logistic_fit |> 
+  augment(new_data = financebirds_test, type.predict = "prob") |>
+  mutate(.pred_correct = if_else(type == "birdsongs", .pred_birdsongs, .pred_finance),
+         .pred_predicted = if_else(.pred_class == "birdsongs", .pred_birdsongs, .pred_finance))
+
+# Compute accuracy and balanced accuracy for LDA
+lda_accuracy <- accuracy(lda_probs, truth = type, estimate = .pred_class)$.estimate
+lda_bal_accuracy <- bal_accuracy(lda_probs, truth = type, estimate = .pred_class) |> pull(.estimate)
+
+# Compute accuracy and balanced accuracy for Logistic Regression
+log_accuracy <- accuracy(logistic_probs, truth = type, estimate = .pred_class)$.estimate
+log_bal_accuracy <- bal_accuracy(logistic_probs, truth = type, estimate = .pred_class) |> pull(.estimate)
+
+# ------------------------------------------------------------------------------
+# Determine whether the models make the same mistakes on the same observations
+# ------------------------------------------------------------------------------
+
+# Add prediction columns to the test set
+financebirds_test_results <- financebirds_test |>
+  mutate(
+    lda_pred = lda_preds$.pred_class,
+    logistic_pred = logistic_preds$.pred_class
+  )
+
+# Identify mismatches
+mistakes <- financebirds_test_results |> 
+  filter(lda_pred != type | logistic_pred != type) |> 
+  mutate(same_mistake = lda_pred == logistic_pred & lda_pred != type) 
+
+# Generate a nice table summary
+mistakes_summary <- mistakes |>
+  summarise(
+    lda_total_mistakes = sum(lda_pred != type),
+    logistic_total_mistakes = sum(logistic_pred != type),
+    same_mistake_count = sum(lda_pred == logistic_pred & lda_pred != type)
+  )
+
+# ------------------------------------------------------------------------------
+# ----------------------- Plot the model confidence ----------------------------
+# ------------------------------------------------------------------------------
+
+# Boxplot of model confidence for LDA (on correct class)
+lda_boxplot <- ggplot(lda_probs, aes(x = type, y = .pred_correct)) +
+  geom_boxplot(fill = "skyblue") +
+  labs(x = "True Type", y = "Predicted Probability")
+
+# Boxplot for logistic regression
+log_boxplot <- ggplot(logistic_probs, aes(x = type, y = .pred_correct)) +
+  geom_boxplot(fill = "lightgreen") +
+  labs(x = "True Type", y = "Predicted Probability")
+
+
+# Prepare data for tour — include only numeric features
+#lda_tour_data <- lda_probs |> 
+#  mutate(col = type,
+#         size = 1.5 * .pred_predicted + 1) |> 
+#  select(linearity, entropy, x_acf1, covariate1, covariate2, col, size)
+
+# Create the tour
+#set.seed(123)
+#render_gif(lda_tour_data[, 1:5],
+#           grand_tour(),
+#           display_xy(col = lda_tour_data$col,
+#                      cex = lda_tour_data$size,
+#                      half_range = 40,
+#                      axes = "bottomleft"),
+#           gif_file = "lda_tour.gif",
+#           width = 500,
+#           height = 400,
+#           apf = 1/60,
+#           frames = 1500)
+
+#set.seed(123)
+#render_gif(lda_tour_data[, 1:5],
+#           grand_tour(),
+#           display_xy(col = lda_tour_data$col,
+#                      cex = lda_tour_data$size,
+#                      half_range = 15,
+#                      axes = "bottomleft"),
+#           gif_file = "lda_tour.gif",
+#           width = 500,
+#           height = 400,
+#           apf = 1/60,
+#           frames = 1500)
+
+# ------------------------------------------------------------------------------
+# ------------------------------ plot the errors -------------------------------
+# ------------------------------------------------------------------------------
+
+# --------------------------------- LDA ----------------------------------------
+
+# 1. Get predictions for the test data
+lda_preds <- predict(lda_fit$fit, financebirds_test)
+
+# 2. Prepare the data (include prediction, jittered factor levels, etc.)
+fb_cl <- financebirds_test |> 
+  mutate(p_type = lda_preds$class) |> 
+  select(linearity, entropy, x_acf1, covariate1, covariate2, type, p_type) |> 
+  mutate(type_jit = jitter(as.numeric(type)),
+         ptype_jit = jitter(as.numeric(p_type)))
+
+# 3. Create SharedData object for linked interactivity
+fb_cl_shared <- SharedData$new(fb_cl)
+
+# 4. Detour tour plot
+fb_tour_plot <- detour(fb_cl_shared, tour_aes(
+  projection = linearity:covariate2,
+  colour = type)) |>
+  tour_path(grand_tour(2), max_bases = 50, fps = 60) |>
+  show_scatter(alpha = 0.9, axes = FALSE, width = "100%", height = "450px")
+
+# 5. Confusion matrix-style scatter with jitter
+fb_conf_plot <- plot_ly(fb_cl_shared, 
+                        x = ~ptype_jit,
+                        y = ~type_jit,
+                        color = ~type,
+                        colors = viridis_pal(option = "D")(2),  # 2 classes: birdsongs, finance
+                        height = 450) |>
+  highlight(on = "plotly_selected", off = "plotly_doubleclick") |>
+  add_trace(type = "scatter", mode = "markers")
+
+
+# -------------------------------- Logistic ------------------------------------
+# 1. Prepare the data with predictions
+fb_log_cl <- financebirds_test |> 
+  mutate(p_type = logistic_preds$.pred_class) |> 
+  select(linearity, entropy, x_acf1, covariate1, covariate2, type, p_type) |> 
+  mutate(type_jit = jitter(as.numeric(type)),
+         ptype_jit = jitter(as.numeric(p_type)))
+
+# 2. Create SharedData object
+fb_log_shared <- SharedData$new(fb_log_cl)
+
+# 3. Detour tour plot
+log_tour_plot <- detour(fb_log_shared, tour_aes(
+  projection = linearity:covariate2,
+  colour = type)) |>
+  tour_path(grand_tour(2), max_bases = 50, fps = 60) |>
+  show_scatter(alpha = 0.9, axes = FALSE, width = "100%", height = "450px")
+
+# 4. Confusion matrix-style scatter with jitter
+log_conf_plot <- plot_ly(fb_log_shared, 
+                         x = ~ptype_jit,
+                         y = ~type_jit,
+                         color = ~type,
+                         colors = viridis_pal(option = "D")(2),
+                         height = 450) |>
+  highlight(on = "plotly_selected", off = "plotly_doubleclick") |>
+  add_trace(type = "scatter", mode = "markers")
+```
+
+::: columns
+::: column
+
+[Table 5: LDA Model Confusion Matrix]{.figure-title}
+
+::: {.center-div}
+
+::: {.kable-wrapper}
+```{r question2d-i, echo=FALSE}
+kable(lda_cm) |> kable_styling(full_width = FALSE)
+```
+:::
+
+:::
+
+:::
+
+::: column
+
+[Table 6: Logistic Regression Model Confusion Matrix]{.figure-title}
+
+::: {.center-div}
+
+::: {.kable-wrapper}
+```{r question2d-ii, echo=FALSE}
+kable(logistic_cm) |> kable_styling(full_width = FALSE)
+```
+:::
+
+:::
+
+:::
+
+:::
+
+As can be seen from the confusion matrices in Tables 5 and 6, for the test set, the LDA
+model is better at predicting financial time series than the Logistic Regression model - correctly predicting finacial time series 79.3% of the time compared to the Logistic Regression model's 70.7%. Meanwhile the Logistic Regression model is better at predicting audio tracks of birds than the LDA model. In fact, the Logistic Regression model correctly predicts birdsongs 86.7% of the time while the LDA model correctly predicts bird songs 76.2% of the time in the test set.
+
+From the confusion matrices, the accuracy and balanced accuracy for the two different models can be determined.
+
+
+::: columns
+::: column
+
+::: {.justified}
+For the LDA model, 
+:::
+
+$$accuracy = `r round(lda_accuracy,4)*100`\%$$
+$$balanced \ accuracy = `r round(lda_bal_accuracy,4)*100`\%$$ 
+
+:::
+
+::: column
+
+::: {.justified}
+For the Logistic Regression, 
+:::
+
+$$accuracy = `r round(log_accuracy,4)*100`\%$$
+$$balanced \ accuracy = `r round(log_bal_accuracy,4)*100`\%$$
+
+:::
+:::
+
+As can be seen, the Logistic Regression model has a higher accuracy and balanced
+accuracy, while, the LDA model has a slightly lower accuracy and balanced
+accuracy. Overall, if we were to only use this metric, it indicates that the Logistic Regression model was
+more appropriate out of the two. However, this would not be the best way to choose the most accurate model as these measures are for one cut-off point (by default 0.5). Area Under the Curve (AUC) of a Receiver Operating Characteristic (ROC) evaluates the accuracy for every single cut-off point, making the conclusions drawn from it producing  a model with the most accurate probabilities. More information on ROC Curve for these two models is seen in Section 2e). 
+
+Figure 2 and Figure 3 illustrate the different models confidence in
+predicting the correct class.
+
+::: columns
+::: column
+
+[Figure 2: LDA Model Confidence in Correct Class]{.figure-title}
+```{r question-2d-iii, echo=FALSE}
+# Display LDA boxplot
+lda_boxplot
+```
+:::
+
+::: column
+
+[Figure 3: Logistic Regression Model Confidence in Correct Class]{.figure-title}
+```{r question-2d-iv, echo=FALSE}
+# Display logistic boxplot
+log_boxplot
+```
+:::
+:::
+
+As can be seen in Figure 2, the LDA model is more confident at
+classifying financial time series than audio tracks of birds, with a higher median, meanwhile, the
+Logistic Regression model is highly confident at classifying both with a
+few incorrectly-looking low confidence values even when correct (as seen
+in Figure 3). 
+
+[Mistakes]{.underline}
+
+In total there are `r nrow(mistakes)` unique mistakes made among the LDA
+model and the Logistic Regression model. A glimpse at the first 10 mistakes can be
+seen in Table 7.
+
+::: {.center-div}
+
+[Table 7: Glimpse at the Mistakes made by the LDA and Logistic model]{.figure-title}
+
+::: {.kable-wrapper}
+```{r question-2d-v, echo = FALSE}
+head(mistakes) |> 
+  select(lda_pred, logistic_pred, type, same_mistake) |>
+  kable() |>
+  kable_styling(full_width = FALSE)
+```
+:::
+
+:::
+
+Breaking this down further, Table 8 outlines a summary of the mistakes
+made by the two linear models.
+
+::: {.center-div}
+
+[Table 8: Summary of the Mistakes Made by LDA and Logistic Regression Model]{.figure-title}
+
+::: {.kable-wrapper}
+```{r question-2d-vi, echo=FALSE}
+kable(mistakes_summary) |>
+  kable_styling(full_width = FALSE)
+```
+:::
+
+:::
+
+
+As can be seen in Table 8, there are 50 mistakes done by both LDA and
+logistic regression model, meaning that `r round(50/65, 4)*100`% of LDA
+model mistakes and `r round(50/63, 4)*100`% of Logistic regression model
+mistakes are based on the same observations. That is a very large chunk.
+
+To better understand why this is a case, Figure 4 and Figure 5 helps us
+investigate.
+
+::: {.center-div}
+[Figure 4: LDA Model: Grand Tour and Confusion Scatterplot]{.figure-title}
+```{r question-2d-vii, echo=FALSE}
+bscols(fb_tour_plot, fb_conf_plot, widths = c(5, 6))
+
+```
+:::
+
+::: {.center-div}
+[Figure 5: Logistic Regression Model: Grand Tour and Confusion Scatterplot]{.figure-title}
+```{r question-2d-viii, echo=FALSE}
+bscols(log_tour_plot, log_conf_plot, widths = c(5, 6))
+```
+:::
+
+As can be seen in Figure 4 and Figure 5, the grand tours illustrates
+that it can be confusing to classify the correct type sometimes due to
+the overlap of the two time series types. Consequently, as can be seen in the confusion scatter plot
+for both LDA and Logistic Regression (Figure 4 and 9), there are
+misclassifications for both birdsongs and finance. Interestingly, it
+looks like the misclassification amount is roughly similar for both
+types and both models.
+
+##### e) 
+
+```{r question-2e, echo = FALSE, warning=FALSE}
+
+# Probabilities for LDA
+lda_probs <- predict(lda_fit, new_data = financebirds_test, type = "prob")
+
+# Probabilities for Logistic Regression
+logistic_probs <- predict(logistic_fit, new_data = financebirds_test, type = "prob")
+
+# Add true labels for LDA and logistic
+lda_roc_data <- bind_cols(financebirds_test, lda_probs)
+logistic_roc_data <- bind_cols(financebirds_test, logistic_probs)
+
+# LDA ROC
+lda_roc <- roc_curve(lda_roc_data, truth = type, .pred_birdsongs)
+
+# Logistic Regression ROC
+logistic_roc <- roc_curve(logistic_roc_data, truth = type, .pred_birdsongs)
+
+# Add model column to each ROC dataframe
+lda_roc_df <- as.data.frame(lda_roc) |> mutate(Model = "LDA")
+logistic_roc_df <- as.data.frame(logistic_roc) |> mutate(Model = "Logistic Regression")
+
+# Combine them
+combined_roc <- bind_rows(lda_roc_df, logistic_roc_df)
+
+# Plot with legend
+roc_curves <- ggplot(combined_roc, aes(x = 1 - specificity, y = sensitivity, color = Model)) +
+  geom_line(size = 1) +
+  labs(
+    x = "False Positive Rate (1 - Specificity)",
+    y = "True Positive Rate (Sensitivity)",
+    color = "Model"
+  ) +
+  theme_minimal()
+
+# Compute AUCs
+lda_auc <- roc_auc(lda_roc_data, truth = type, .pred_birdsongs) |> pull(.estimate)
+log_auc <- roc_auc(logistic_roc_data, truth = type, .pred_birdsongs) |> pull(.estimate)
+
+# Create a tibble for display or plotting
+auc_df <- tibble(
+  Model = c("LDA", "Logistic Regression"),
+  AUC = c(lda_auc, log_auc)
+)
+
+```
+
+The ROC curves for the LDA model and the Logistic Regression model can
+be seen in Figure 6.
+
+::: {.center-div}
+[Figure 6: LDA vs Logistic Regression Model ROC Curves]{.figure-title}
+```{r question-2e-i, echo = FALSE, warning=FALSE}
+roc_curves
+```
+:::
+
+As can be seen in Figure 6, the ROC curve for the two models are very
+similar, with the LDA ROC curve looking marginally better. To confirm this, we can check the area under the ROC curve (known as AUC), which has been
+summarised in Table 9.
+
+::: {.center-div}
+[Table 9: Area Under the ROC Curve for the LDA and Logistic Regression Model]{.figure-title}
+
+::: {.kable-wrapper}
+```{r question-2e-ii, echo = FALSE}
+kable(auc_df) |>
+  kable_styling(full_width = FALSE)
+```
+:::
+
+:::
+
+As can be seen in Table 9, the LDA model had a marginally better AUC value, which supports our visual conclusion made about the ROC curve. The ROC tells us how well the model separates the two classes regardless of a decision threshold. Consequently, out of the two, *the LDA model is the better model*. However, I want to note that as the AUC for both of the models are so similar, the difference between the two models is minimal, meaning that if one wanted a more simple model with similar accuracy, the Logistic Regression model may be suitable.  
+
+##### f) 
+
+From the LDA and Linear Regression model, we can conclude how the time series for financial data and birdsongs typically differ. From both of the fitted models, we saw from Table 3 and Table 4 that the variables `entropy` and `covariate2` are very significant in helping to distinguish between birdsongs and financial data. Additionally, `linearity` can also be critical in helping distinguish between birdsongs and financial data, with such contrasting means and variance between the two types as seen in Table 2. However, there are around 50 observations that both models found difficult to correctly predict (as outlined in Table 8), contributing to the major drawbacks in helping distinguish between the different time series. When looking at the tour and confusion scatterplot in Figure 4 and 9, we saw that in general the difference between the two types are easily distinguishable, except for a few (~50) points that overlap in some frames of the tour. 
+
+Overall, we can see from the fitted model and summary statistics that the time series for financial data and birdsongs typically differ due to `entropy`, `covariate2` and `linearity`.    
+
+#### Tuning a non-linear classifier
+
+##### a)
+
+Using the `tidymodels` style of coding, a "bad" decision tree was fitted
+to the training data, with a `min_n = 1` and `cost_complexity = 0`. This
+means we are training a tree with the minimum number of samples required
+to split being 1, and no penalty for adding extra branches.
+Consequently, this "bad" decision tree, is going to be extremely
+overfitted. A plot of this extremely overfitted, "bad" decision tree can be
+seen in Figure 7.
+
+::: {.center-div}
+
+[Figure 7: "Bad" Decision Tree Fit]{.figure-title}
+
+```{r question-3a, echo = FALSE, warning=FALSE}
+# Define a "bad" decision tree spec
+bad_tree_spec <- decision_tree(
+  min_n = 1,
+  cost_complexity = 0
+) |>
+  set_mode("classification") |>
+  set_engine("rpart", model = TRUE)
+
+# Fit the decision tree model on the training set
+bad_tree_fit <- bad_tree_spec |>
+  fit(type ~ linearity + entropy + x_acf1 + covariate1 + covariate2, data = financebirds_train)
+
+
+# Plot the tree
+bad_tree_fit |> extract_fit_engine() |> rpart.plot(type = 3, extra = 1)
+
+# Predict on training set
+bad_tree_train_preds <- predict(bad_tree_fit, new_data = financebirds_train) |>
+  bind_cols(financebirds_train)
+
+# Predict on test set
+bad_tree_test_preds <- predict(bad_tree_fit, new_data = financebirds_test) |>
+  bind_cols(financebirds_test)
+
+# Create confusion matrices
+bad_tree_cm_train <- bad_tree_train_preds |> 
+  select(type, .pred_class) |> 
+  count(type, .pred_class) |> 
+  group_by(type) |> 
+  mutate(cl_acc = n[.pred_class == type] / sum(n)) |> 
+  pivot_wider(names_from = .pred_class, values_from = n) |> 
+  select(type, birdsongs, finance, cl_acc)
+
+
+bad_tree_cm_test <- bad_tree_test_preds |> 
+  select(type, .pred_class) |> 
+  count(type, .pred_class) |> 
+  group_by(type) |> 
+  mutate(cl_acc = n[.pred_class == type] / sum(n)) |> 
+  pivot_wider(names_from = .pred_class, values_from = n) |> 
+  select(type, birdsongs, finance, cl_acc)
+
+# Calculate accuracy of training and testing set
+bad_tree_accuracy_train <- accuracy(bad_tree_train_preds, truth = type, estimate = .pred_class)$.estimate
+bad_tree_bal_accuracy_train <- bal_accuracy(bad_tree_train_preds, truth = type, estimate = .pred_class)$.estimate
+
+bad_tree_accuracy_test <- accuracy(bad_tree_test_preds, truth = type, estimate = .pred_class)$.estimate
+bad_tree_bal_accuracy_test <- bal_accuracy(bad_tree_test_preds, truth = type, estimate = .pred_class)$.estimate
+```
+:::
+
+This "bad" decision tree is so complex and overfitted that the data is extremely hard to
+read. In fact, there are `r sum(bad_tree_fit$fit$frame$var == "<leaf>")` terminal
+nodes, and `r nrow(bad_tree_fit$fit$frame)` branches in this "bad" decision
+tree. This tree shows some deep splits and many branches indicating that
+it did a good job 'memorising' patterns in the training data.
+
+In investigating the importance of the variables for this "bad" decision tree,
+a summary table can be seen in Table 10.
+
+::: {.center-div}
+[Table 10: Variable Importance for the "Bad" Decision Tree]{.figure-title}
+
+::: {.kable-wrapper}
+```{r question-3a-i, echo = FALSE}
+kable(bad_tree_fit$fit$variable.importance) |>
+  kable_styling(full_width = FALSE)
+```
+:::
+
+:::
+
+As can be seen in Table 10, `linearity` and `covariate2` are extremely significant
+in helping distinguish the type, while `entropy` and `x_acf1` are also
+significant, and `covariate1` being the least significant.
+
+Table 11 and Table 12 both give us insights into how well the "bad"
+decision tree performed on the training data set and the testing data
+set, respectively.
+
+
+::: columns
+::: column
+
+[Table 11: Confusion Matrix on Training Data for "Bad" Decision Tree]{.figure-title}
+
+::: {.center-div}
+
+::: {.kable-wrapper}
+```{r question-3a-ii, echo = FALSE}
+# Print confusion matrix
+kable(bad_tree_cm_train) |> kable_styling(full_width = FALSE)
+```
+:::
+
+:::
+
+::: 
+
+::: column
+
+
+[Table 12: Confusion Matrix on Testing Data for "Bad" Decision Tree]{.figure-title}
+
+::: {.center-div}
+
+::: {.kable-wrapper}
+```{r question-3a-iii, echo = FALSE}
+# Print confusion matrix
+kable(bad_tree_cm_test) |> kable_styling(full_width = FALSE)
+```
+:::
+
+:::
+
+:::
+:::
+
+
+As can be seen in Table 11, the "bad" decision tree ending up perfectly
+guessing/fitting every single observation in the training set - a clear
+sign of overfitting. Meanwhile, when looking at the test set confusion
+matrix seen in Table 12, the "bad" decision tree, didn't end up
+performing as "bad" as one might expect, with it correctly predicting
+birdsongs 87.4% of the time and finance 84.7% of the time. Although the
+model is overfitted, it actually seemed to perform **okay**.
+
+
+::: columns
+::: column
+
+::: {.justified}
+On the training set:
+:::
+
+$$accuracy = `r round(bad_tree_accuracy_train,4)*100`\%$$
+$$balanced \ accuracy = `r round(bad_tree_bal_accuracy_train,4)*100`\%$$
+
+:::
+
+::: column
+
+:::{.justified}
+On the test set: 
+:::
+
+$$accuracy = `r round(bad_tree_accuracy_test,4)*100`\%$$
+$$balanced \ accuracy = `r round(bad_tree_bal_accuracy_test,4)*100`\%$$
+
+:::
+:::
+
+As can be seen, regarding the training set, as expected it achieved a
+perfect score of 100% for accuracy and balanced accuracy due to overfitting
+the data. Surprisingly on the test set it continued to still perform
+alright, with an accuracy of `r round(bad_tree_accuracy_test,4)*100`%
+and a balanced accuracy of `r round(bad_tree_bal_accuracy_test,4)*100`%.
+This overfitted, "bad" decision tree actually has a higher accuracy and balanced accuracy on the test set than the LDA or Logistic Regression model. (Again note that for a more correct analysis, to compare the models the ROC curves must be compared, as done in Section 3C).
+
+##### b) 
+
+Using the capabilities in `tidymodels`, the optimal tree parameters -
+`tree_depth`, `min_n`, `cost_complexity` - were determined. The code
+used to determined the optimal tree parameters can be seen below.
+
+```{r question-3b, results = "hide"}
+# Define the tunable decision tree spec
+tune_spec <- 
+  decision_tree(
+    cost_complexity = tune(),
+    tree_depth = tune(),
+    min_n = tune()
+  ) |> 
+  set_engine("rpart") |> 
+  set_mode("classification")
+
+# Create a grid of parameters to tune
+tree_grid <- grid_regular(
+  cost_complexity(),
+  tree_depth(),
+  min_n(),
+  levels = 5
+)
+
+# Set up cross-validation folds
+set.seed(234)
+financebirds_folds <- vfold_cv(financebirds_train, v = 5, strata = type)
+
+# Create a workflow
+tree_wf <- workflow() |>
+  add_model(tune_spec) |>
+  add_formula(type ~ linearity + entropy + x_acf1 + covariate1 + covariate2)
+
+# Perform the tuning
+set.seed(345)
+tree_res <- tree_wf |> 
+  tune_grid(
+    resamples = financebirds_folds,
+    grid = tree_grid,
+    metrics = NULL  # Computes a standard set of metrices
+  )
+
+# View and summarise results
+tree_res |> collect_metrics() |> slice_head(n = 6)
+
+# Find the best combination (based on AUC)
+tree_top_5 <- tree_res |> show_best(metric = "roc_auc")
+tree_best <- tree_res |> select_best(metric = "roc_auc")
+
+# Finalize workflow and fit on training data
+tuned_tree_wf <- tree_wf |> finalize_workflow(tree_best)
+tuned_tree_fit <- tuned_tree_wf |> fit(data = financebirds_train)
+```
+
+To determine the most optimal tree parameters, I defined a tune-able
+decision tree model specification with cost complexity, tree depth, and
+minimum node size as hyperparameters. I then created a regular grid of
+parameter combinations (with five levels for each hyperparameter) and
+implemented five-fold cross-validation. Each model in the grid was
+trained and evaluated using default classification metrics. After
+tuning, I collected and analysed the performance metrics and selected
+the best hyperparameter combination based on ROC AUC.
+
+The top 5 best performing tuned decision tree models, based on ROC AUC, can be seen in Table
+13.
+
+::: {.center-div}
+
+[Table 13: Top 5 Tuned Decision Tree Models Ranked by ROC AUC Performance]{.figure-title}
+
+```{r question-3b-i, echo = FALSE}
+tree_top_5$cost_complexity <- format(tree_top_5$cost_complexity, scientific = TRUE) # Keep cost complexity in scientific notation when formatted 
+kable(tree_top_5)
+```
+:::
+
+As can be seen in Table 13, the ROC AUC mean value is similar for the
+top 5, however, what makes the first model (seen in the first row) superior is the combination of
+a low `cost_complexity` and lower `tree_depth`.
+
+Consequently, the hyperparameters that will lead to the best model can be
+seen in Table 14.
+
+::: {.center-div}
+
+[Table 14: Best Tuned Decision Tree Hyperparameters Model Based on ROC AUC]{.figure-title}
+
+::: {.kable-wrapper}
+```{r question-3b-ii, echo = FALSE}
+tree_best$cost_complexity <- format(tree_best$cost_complexity, scientific = TRUE) # Keep cost complexity in scientific notation when formatted 
+kable(tree_best |> select(-.config))  |> kable_styling(full_width = FALSE)
+```
+:::
+
+:::
+
+
+##### c)
+
+Using the optimal hyperparameters, `min_n = 30`, `tree_depth = 8` and
+`cost_complexity = 1e-10`, the tuned decision tree was fitted to the
+training data. This means we are training a tree with the minimum number
+of samples required to split being 30, the maximum number of branches
+from the root being 8 and a very small penalty for adding extra
+branches. Consequently, this "tuned" decision tree, should not overfit the
+data like the "bad" decision tree. A plot of this tuned decision tree can be seen in Figure 8.
+
+::: {.center-div}
+
+[Figure 8: Tuned Decision Tree Fit]{.figure-title}
+```{r question-3c, echo = FALSE, warning=FALSE}
+# Plot final tree
+tuned_tree_fit |> extract_fit_engine() |> rpart.plot(type = 3, extra = 1)
+
+# Add class probabilities
+bad_tree_preds_probs <- predict(bad_tree_fit, new_data = financebirds_test, type = "prob") |>
+  bind_cols(financebirds_test)
+
+tuned_tree_preds_probs <- predict(tuned_tree_fit, new_data = financebirds_test, type = "prob") |>
+  bind_cols(financebirds_test)
+
+# ROC Curve
+bad_tree_roc <- roc_curve(bad_tree_preds_probs, truth = type, .pred_birdsongs)
+tuned_tree_roc <- roc_curve(tuned_tree_preds_probs, truth = type, .pred_birdsongs)
+
+# Add model labels
+bad_tree_roc_df <- as.data.frame(bad_tree_roc) |> mutate(Model = "Bad Decision Tree")
+tuned_tree_roc_df <- as.data.frame(tuned_tree_roc) |> mutate(Model = "Tuned Decision Tree")
+
+# Combine into one data frame
+combined_tree_roc <- bind_rows(bad_tree_roc_df, tuned_tree_roc_df)
+
+# Plot the ROC curves
+tree_roc_curves <- ggplot(combined_tree_roc, aes(x = 1 - specificity, y = sensitivity, color = Model)) +
+  geom_line(size = 1) +
+  labs(
+    x = "False Positive Rate (1 - Specificity)",
+    y = "True Positive Rate (Sensitivity)",
+    color = "Model"
+  ) +
+  theme_minimal()
+  
+#  tree_preds_probs |> 
+#  roc_curve(type, .pred_birdsongs) |> 
+#  autoplot() +
+#  labs(title = "Figure 9: ROC Curve for Tuned Decision Tree", 
+#       x = "False Positive Rate (1 - Specificity)", 
+#       y = "True Positive Rate (Sensitivity)")
+
+# Compute AUCs
+bad_tree_auc <- roc_auc(bad_tree_preds_probs, truth = type, .pred_birdsongs) |> pull(.estimate)
+tuned_tree_auc <- roc_auc(tuned_tree_preds_probs, truth = type, .pred_birdsongs) |> pull(.estimate)
+
+# Create a tibble for display or plotting
+trees_auc_df <- tibble(
+  Model = c("Bad Decision Tree", "Tuned Decision Tree"),
+  AUC = c(bad_tree_auc, tuned_tree_auc)
+)
+
+# Predict on training set
+tuned_tree_train_preds <- predict(tuned_tree_fit, new_data = financebirds_train) |>
+  bind_cols(financebirds_train)
+
+# Predict on test set
+tuned_tree_test_preds <- predict(tuned_tree_fit, new_data = financebirds_test) |>
+  bind_cols(financebirds_test)
+
+# Create confusion matrices
+tuned_tree_cm_train <- tuned_tree_train_preds |> 
+  select(type, .pred_class) |> 
+  count(type, .pred_class) |> 
+  group_by(type) |> 
+  mutate(cl_acc = n[.pred_class == type] / sum(n)) |> 
+  pivot_wider(names_from = .pred_class, values_from = n) |> 
+  select(type, birdsongs, finance, cl_acc)
+
+
+tuned_tree_cm_test <- tuned_tree_test_preds |> 
+  select(type, .pred_class) |> 
+  count(type, .pred_class) |> 
+  group_by(type) |> 
+  mutate(cl_acc = n[.pred_class == type] / sum(n)) |> 
+  pivot_wider(names_from = .pred_class, values_from = n) |> 
+  select(type, birdsongs, finance, cl_acc)
+
+
+tuned_tree_accuracy_train <- accuracy(tuned_tree_train_preds, truth = type, estimate = .pred_class)$.estimate
+tuned_tree_bal_accuracy_train <- bal_accuracy(tuned_tree_train_preds, truth = type, estimate = .pred_class)$.estimate
+
+tuned_tree_accuracy_test <- accuracy(tuned_tree_test_preds, truth = type, estimate = .pred_class)$.estimate
+tuned_tree_bal_accuracy_test <- bal_accuracy(tuned_tree_test_preds, truth = type, estimate = .pred_class)$.estimate
+```
+:::
+
+As can be seen in Figure 8, the tuned decision tree is somewhat complex, but relative to the "bad" decision tree seen in Figure 7,
+it is not even close. In fact, in the tuned decision tree, there are 15 terminal nodes, and 14 branches.
+
+In investigating the importance of the variables for this tuned decision tree,
+a summary table can be seen in Table 15.
+
+::: {.center-div}
+[Table 15: Variable Importance for the Tuned Decision Tree]{.figure-title}
+
+::: {.kable-wrapper}
+```{r question-3c-i, echo = FALSE}
+kable(extract_fit_engine(tuned_tree_fit)$variable.importance) |> kable_styling(full_width = FALSE)
+```
+:::
+
+:::
+
+
+Exactly the same as for the 'bad' decision tree, we can see from Table 15 that the
+`linearity` and `covariate2` are extremely significant in helping
+distinguish the type for the tuned decision tree, while `entropy` and
+`x_acf1` are also significant, and `covariate1` being the least
+significant.
+
+Table 16 and Table 17 both give us insights into how well the tuned
+decision tree performed on the training data set and the testing data
+set, respectively.
+
+::: columns
+::: column
+
+[Table 16: Confusion Matrix on Training Data for Tuned Decision Tree]{.figure-title}
+
+::: {.center-div}
+
+::: {.kable-wrapper}
+```{r question-3c-ii, echo = FALSE}
+# Print confusion matrix
+kable(tuned_tree_cm_train)
+```
+:::
+
+:::
+
+::: 
+
+::: column
+
+[Table 17: Confusion Matrix on Testing Data for Tuned Decision Tree]{.figure-title}
+
+::: {.center-div}
+
+::: {.kable-wrapper}
+```{r question-3c-iii, echo = FALSE}
+# Print confusion matrix
+kable(tuned_tree_cm_test) |> kable_styling(full_width = FALSE)
+```
+:::
+
+:::
+
+::: 
+::: 
+
+As can be seen in Table 16, the tuned decision tree ending up correctly
+predicting birdsongs 93.7% of the time and finance 90.3% of the time in
+the training set - unlike the overfitted model that achieved 100% in the
+training set. When looking at the test set confusion matrix seen in
+Table 17, the tuned decision tree correctly predicting birdsongs 93.0%
+of the time and finance 82.7% of the time. Overall, this is quite a good
+result.
+
+::: columns
+::: column
+
+::: {.justified}
+On the training set:
+:::
+
+$$accuracy = `r round(tuned_tree_accuracy_train,4)*100`\%$$
+$$balanced \ accuracy = `r round(tuned_tree_bal_accuracy_train,4)*100`\%$$
+
+::: 
+
+::: column
+
+::: {.justified}
+On the test set:
+:::
+
+$$accuracy = `r round(tuned_tree_accuracy_test,4)*100`\%$$
+$$balanced \ accuracy = `r round(tuned_tree_bal_accuracy_test,4)*100`\%$$
+
+::: 
+::: 
+
+As can be seen, regarding the training set, the accuracy and balanced
+accuracy are very high and on the test set it continued to still perform
+quite well, with an accuracy of
+`r round(tuned_tree_accuracy_test,4)*100`% and a balanced accuracy of
+`r round(tuned_tree_bal_accuracy_test,4)*100`%. This tuned decision tree has a higher accuracy and balanced accuracy on the test set than the "bad" decision tree, LDA or Logistic Regression model.
+
+Now in terms of which model is the most accurate and the best choice, Figure 9 illustrates the ROC Curve for
+the "bad" decision tree and the tuned decision tree.
+
+::: {.center-div}
+
+[Figure 9: ROC Curves for Bad vs Tuned Decision Trees]{.figure-title}
+```{r question-3c-iv, echo = FALSE}
+tree_roc_curves 
+```
+:::
+
+As can be seen in Figure 9, the tuned decision tree has a much better
+ROC curve than the "bad" decision tree. Additionally, the "bad" decision
+tree ROC curve seems to follow a two linear piecewise function. Now checking
+the area under the ROC curve, a summary can be seen in Table 18.
+
+::: {.center-div}
+
+[Table 18: Area Under Curve (AUC) for the different decision tree models.]{.figure-title}
+
+::: {.kable-wrapper}
+
+```{r question-3c-v, echo = FALSE}
+kable(trees_auc_df)  |> kable_styling(full_width = FALSE)
+```
+:::
+
+:::
+
+Regarding the ROC Curve and the AUC, the "bad" decision tree performed worse than LDA or Logistic Regression Model - having a lower AUC. However, the tuned decision tree had a *much* better ROC Curve and AUC value than the "bad" decision tree, LDA and Logistic Regression model. Therefore, in practice I would use the tuned decision tree over any of the other three models, as it is reasonably more accurate. This decision makes sense because, given the data set, a tuned decision tree will definitely outperform the linear models as one clear linear separation is not apparent when looking at the data (see Figure 4 and 9 Grand Tours to visualise it).
+
+#### Which is the better classifier? 
+
+##### a)
+
+A Random Forest model was developed to distinguish between financial time series and audio tracks of birds. Using the `randomForest` engine with 1000 trees, I tuned `mtry` and `min_n` through a 5-fold stratified cross-validation. I created a regular grid over the ranges `mtry = 1 to 5` and `min_n = 2 to 20`, using 5 levels for each parameter. I selected the best hyperparameters for the model based on ROC AUC and finalised the workflow before fitting it to the full training set.
+
+**Note:** I also played around with using the `Ranger` engine, however, `randomForest` seemed to perform better.
+
+```{r question-4a, echo = FALSE, results='hide'}
+# -------------------------------- FIT THE MODEL -------------------------------
+# Define the random forest model
+rf_spec <- rand_forest(
+  mtry = tune(),
+  min_n = tune(),
+  trees = 1000
+) |>
+  set_engine("randomForest") |>   #set_engine("ranger", importance = "impurity")
+  set_mode("classification") 
+
+# Create 5-fold CV
+set.seed(234)
+rf_folds <- vfold_cv(financebirds_train, v = 5, strata = type)
+
+# Workflow
+rf_wf <- workflow() |>
+  add_model(rf_spec) |>
+  add_formula(type ~ linearity + entropy + x_acf1 + covariate1 + covariate2)
+
+# Create tuning grid
+rf_grid <- grid_regular(
+  mtry(range = c(1, 5)),
+  min_n(range = c(2, 20)),
+  levels = 5
+)
+
+# Tune model 
+set.seed(345)
+rf_res <- rf_wf |>
+  tune_grid(
+    resamples = rf_folds,
+    grid = rf_grid,
+    metrics = NULL
+  )
+
+# View and summarise results
+rf_res |> collect_metrics() |> slice_head(n = 6)
+
+# -------------- SELECT THE BEST PARAMETERS AND FINALISE THE MODEL -------------
+# Select best by AUC
+rf_top_5 <- rf_res |> show_best(metric = "roc_auc")
+rf_best <- rf_res |> select_best(metric = "roc_auc")
+
+# Finalize and fit
+final_rf_wf <- rf_wf |> finalize_workflow(rf_best)
+final_rf_fit <- final_rf_wf |> fit(data = financebirds_train)
+
+
+# --------------------------------- EVALUATE -----------------------------------
+
+# get class probabilities for the test set
+rf_preds_probs <- predict(final_rf_fit, new_data = financebirds_test, type = "prob") |>
+  bind_cols(financebirds_test)
+
+# ROC Curve
+rf_roc <- rf_preds_probs |> roc_curve(truth = type, .pred_birdsongs)
+
+# Compute AUC
+rf_auc <- roc_auc(rf_preds_probs, truth = type, .pred_birdsongs) |> pull(.estimate)
+
+# Predict Classes on Train & Test Sets
+rf_train_preds <- predict(final_rf_fit, new_data = financebirds_train) |>
+  bind_cols(financebirds_train)
+
+rf_test_preds <- predict(final_rf_fit, new_data = financebirds_test) |>
+  bind_cols(financebirds_test)
+
+# Confusion Matrices
+rf_cm_train <- rf_train_preds |> 
+  select(type, .pred_class) |> 
+  count(type, .pred_class) |> 
+  group_by(type) |> 
+  mutate(cl_acc = n[.pred_class == type] / sum(n)) |> 
+  pivot_wider(names_from = .pred_class, values_from = n) |> 
+  select(type, birdsongs, finance, cl_acc)
+
+rf_cm_test <- rf_test_preds |> 
+  select(type, .pred_class) |> 
+  count(type, .pred_class) |> 
+  group_by(type) |> 
+  mutate(cl_acc = n[.pred_class == type] / sum(n)) |> 
+  pivot_wider(names_from = .pred_class, values_from = n) |> 
+  select(type, birdsongs, finance, cl_acc)
+
+# Compute Accuracy and Balanced Accuracy
+rf_accuracy_train <- accuracy(rf_train_preds, truth = type, estimate = .pred_class)$.estimate
+rf_bal_accuracy_train <- bal_accuracy(rf_train_preds, truth = type, estimate = .pred_class)$.estimate
+
+rf_accuracy_test <- accuracy(rf_test_preds, truth = type, estimate = .pred_class)$.estimate
+rf_bal_accuracy_test <- bal_accuracy(rf_test_preds, truth = type, estimate = .pred_class)$.estimate
+
+```
+
+The top 5 best performing tuned random forest models, based on ROC AUC, can be seen in Table 19.
+
+::: {.center-div}
+
+[Table 19: Top 5 Tuned Random Forest Models Ranked by ROC AUC Performance]{.figure-title}
+```{r question-4a-i, echo = FALSE}
+kable(rf_top_5)
+```
+:::
+
+As can be seen in Table 19, the ROC AUC mean value is similar for the top 5. Interestingly, we can see from row 4 that you can achieve extremely high ROC AUC with just `mtry = 2` and `min_n = 15`, which indicates that there are really only two variables that do most of the distinguishing (which is not a surprise, when looking at our previous analysis). Table 20 illustrates the variable importance for the random forest.
+
+::: {.center-div}
+
+[Table 20: Variable Importance for the Random Forest]{.figure-title}
+
+::: {.kable-wrapper}
+
+```{r question-4a-ii, echo = FALSE}
+# Variable Importance
+kable(final_rf_fit |> extract_fit_engine() |> randomForest::importance()) |> kable_styling(full_width = FALSE)
+```
+:::
+
+:::
+
+As can be seen in Table 20, and as seen the other models in this analysis, for a random forest model, `linearity` and `covariate2` are extremely
+significant in helping distinguish the type, while `entropy` and
+`x_acf1` are less significant, and `covariate1` is near negligibly
+significant. Interestingly, `covariate2` is slightly higher than
+`linearity` for the random forest model, which is not the case for the tuned decision tree, "bad" decision tree, LDA and Linear Regression model. Consequently, for the random forest model, `covariate2` is the most important variable in distinguishing the time series type.
+
+Overall, the hyperparameters that will lead to the best random forest model can be seen in Table 21.
+
+::: {.center-div}
+
+[Table 21: Best Tuned Random Forest Parameters Model Based on ROC AUC]{.figure-title}
+
+::: {.kable-wrapper}
+
+```{r question-4a-iii, echo = FALSE}
+kable(rf_best |> select(-.config))  |> kable_styling(full_width = FALSE)
+```
+
+:::
+
+:::
+
+Table 22 and Table 23 both give us insights into how well the random
+forest model performed on the training data set and the testing data set,
+respectively.
+
+::: columns
+::: column
+
+[Table 22: Confusion Matrix on Training Data for Random Forest Model]{.figure-title}
+
+::: {.center-div}
+
+::: {.kable-wrapper}
+
+```{r question-4a-iv, echo = FALSE}
+# Print confusion matrix
+kable(rf_cm_train)  |> kable_styling(full_width = FALSE)
+```
+:::
+
+:::
+
+:::
+
+::: column
+
+[Table 23: Confusion Matrix on Testing Data for Random Forest Model]{.figure-title}
+
+::: {.center-div}
+
+::: {.kable-wrapper}
+
+```{r question-4a-v, echo = FALSE}
+# Print confusion matrix
+kable(rf_cm_test)  |> kable_styling(full_width = FALSE)
+```
+:::
+
+:::
+
+:::
+:::
+
+As can be seen in Table 22, the random forest model ending up correctly predicting birdsongs 94.3% of the time and finance 93.1% of the time in the training set. When looking at the test set confusion matrix seen in Table 23, the random forest model correctly predicting birdsongs 93.7% of the
+time and finance 84.0% of the time. Overall, this is quite a good result and the confusion matrix on the test set is looking better for the random forest model than the other models so far. Note that throughout, and even for the random forest model, the models incorrectly predict birdsong for time series that are finance more often than vice versa. 
+
+::: columns
+::: column
+
+::: {.justified}
+On the training set: 
+:::
+
+$$accuracy = `r round(rf_accuracy_train,4)*100`\%$$
+$$balanced \ accuracy = `r round(rf_bal_accuracy_train,4)*100`\%$$
+:::
+
+::: column
+
+::: {.justified}
+On the test set:
+:::
+
+$$accuracy = `r round(rf_accuracy_test,4)*100`\%$$
+$$balanced \ accuracy = `r round(rf_bal_accuracy_test,4)*100`\%$$ 
+:::
+:::
+
+As can be seen, regarding the training set, the random forest model's accuracy and balanced accuracy are reasonably high (higher than the tuned decision tree model on the training set). For the test set, the random forest model also achieves a high accuracy and balanced accuracy. This random forest model has a higher accuracy and balanced accuracy on the test set than the tuned decision tree, “bad” decision tree, LDA or Logistic Regression model.
+
+Although random forest is doing very well, there still seems to be errors. Even when playing around with the hyperparameters and trying to train a more complex random forest, the results don't improve that much. To better understand why, Table 24 illustrates the probability the random forest had for each type and the vote difference, arranged in order from the smallest vote to largest.
+
+::: {.center-div}
+
+::: {.kable-wrapper}
+
+[Table 24: Random Forest Predictions Sorted by Vote Difference]{.figure-title}
+
+```{r question-4a-vi, echo = FALSE}
+# Determine the vote_diff and predicted class
+rf_vote_diff_df <- rf_preds_probs |>
+  mutate(
+    vote_diff = abs(.pred_birdsongs - .pred_finance),
+    predicted_class = ifelse(.pred_birdsongs > .pred_finance, "birdsongs", "finance"),
+    actual = financebirds_test$type
+  ) |>
+  select(.pred_birdsongs, .pred_finance, vote_diff, predicted_class, actual) |>
+  arrange(vote_diff)
+
+# Display the results
+kable(head(rf_vote_diff_df, 20))  |> kable_styling(full_width = FALSE)
+```
+
+:::
+
+:::
+
+
+As can be seen in Table 24, there are 8 observations that the random forest model is struggles to clearly distinguish (`vote_diff` < 20%). Additionally, within the top 20 observations with the smallest vote difference shown, there are 7 incorrect predictions. Given that in total there are 33 incorrect predictions, and only 7 seen in this small set, it indicates that the variables may not be clearly distinguishable enough to achieve much higher accuracy than what is achieved and explains why there still seems to be errors.
+
+##### b)
+
+A boosted tree model was developed to distinguish between financial time series and audio tracks of birds. Using the `xgboost` engine with 1000 trees, I tuned `mtry`, `min_n` and `tree_depth` through a 5-fold stratified cross-validation. I created a regular grid over the ranges `mtry = 1 to 5`, `min_n = 2 to 20` and `tree_depth = 1 to 10`, using 5 levels for each parameter. I selected the best hyperparameters for the model based on ROC AUC and finalised the workflow before fitting it to the full training set.
+
+**Note:** I also played around with tuning other hyperparameters such as `sample_size`, `learn_rate`, `loss_reduction`, however, they increased compute time drastically and the added accuracy was very minimal - making it less ideal. As such, `mtry`, `min_n` and `tree_depth` were the only hyperparameters tuned for this final analysis.
+
+```{r question-4b, echo = FALSE, results='hide'}
+# -------------------------------- FIT THE MODEL -------------------------------
+# Define the boosted tree model
+boost_spec <- boost_tree(
+  mtry = tune(),
+  min_n = tune(),
+  tree_depth = tune(),
+  trees = 1000
+) |>
+  set_engine("xgboost") |>
+  set_mode("classification")
+
+# Create 5-fold CV
+set.seed(234)
+boost_folds <- vfold_cv(financebirds_train, v = 5, strata = type)
+
+# Workflow
+boost_wf <- workflow() |>
+  add_model(boost_spec) |>
+  add_formula(type ~ linearity + entropy + x_acf1 + covariate1 + covariate2)
+
+# Create tuning grid 
+boost_grid <- grid_regular(
+  mtry(range = c(1, 5)),  
+  min_n(range = c(2, 20)),
+  tree_depth(range = c(1, 10)),
+  levels = 5
+)
+
+# Tune model 
+set.seed(345)
+boost_res <- boost_wf |>
+  tune_grid(
+    resamples = boost_folds,
+    grid = boost_grid,
+    metrics = metric_set(roc_auc, accuracy)
+  )
+
+# View and summarise results
+boost_res |> collect_metrics() |> slice_head(n = 6)
+
+# -------------- SELECT THE BEST PARAMETERS AND FINALISE THE MODEL -------------
+# Select best by AUC
+boosted_top_5 <- boost_res |> show_best(metric ="roc_auc")
+boost_best <- boost_res |> select_best(metric = "roc_auc")
+
+# Finalize and fit
+final_boost_wf <- boost_wf |> finalize_workflow(boost_best)
+final_boost_fit <- final_boost_wf |> fit(data = financebirds_train)
+
+# --------------------------------- EVALUATE -----------------------------------
+
+# get class probabilities for the test set
+boost_preds_probs <- predict(final_boost_fit, new_data = financebirds_test, type = "prob") |>
+  bind_cols(financebirds_test)
+
+# ROC Curve
+boost_roc <- boost_preds_probs |> roc_curve(truth = type, .pred_birdsongs)
+
+# Compute AUC
+boost_auc <- roc_auc(boost_preds_probs, truth = type, .pred_birdsongs) |> pull(.estimate)
+
+# Predict Classes on Train & Test Sets
+boost_train_preds <- predict(final_boost_fit, new_data = financebirds_train) |>
+  bind_cols(financebirds_train)
+
+boost_test_preds <- predict(final_boost_fit, new_data = financebirds_test) |>
+  bind_cols(financebirds_test)
+
+# Confusion Matrices
+boost_cm_train <- boost_train_preds |> 
+  select(type, .pred_class) |> 
+  count(type, .pred_class) |> 
+  group_by(type) |> 
+  mutate(cl_acc = n[.pred_class == type] / sum(n)) |> 
+  pivot_wider(names_from = .pred_class, values_from = n) |> 
+  select(type, birdsongs, finance, cl_acc)
+
+boost_cm_test <- boost_test_preds |> 
+  select(type, .pred_class) |> 
+  count(type, .pred_class) |> 
+  group_by(type) |> 
+  mutate(cl_acc = n[.pred_class == type] / sum(n)) |> 
+  pivot_wider(names_from = .pred_class, values_from = n) |> 
+  select(type, birdsongs, finance, cl_acc)
+
+# Accuracy and Balanced Accuracy
+boost_accuracy_train <- accuracy(boost_train_preds, truth = type, estimate = .pred_class)$.estimate
+boost_bal_accuracy_train <- bal_accuracy(boost_train_preds, truth = type, estimate = .pred_class)$.estimate
+
+boost_accuracy_test <- accuracy(boost_test_preds, truth = type, estimate = .pred_class)$.estimate
+boost_bal_accuracy_test <- bal_accuracy(boost_test_preds, truth = type, estimate = .pred_class)$.estimate
+
+```
+
+The top 5 best performing tuned boosted tree models, based on ROC AUC, can be seen in Table 25.
+
+::: {.center-div}
+
+[Table 25: Top 5 Tuned Boosted Tree Models Ranked by ROC AUC Performance]{.figure-title}
+
+```{r question-4b-i, echo = FALSE}
+kable(boosted_top_5)
+```
+
+:::
+
+As can be seen in Table 25, the ROC AUC mean value is similar for the top 5, with the main difference in the hyperparameters being the `mtry` value. Noticeably, an `tree_depth = 1` for all top 5, indicating a very shallow tree, however, a `min_n = 2` is also consistent, indicating there must be at least 2 observations to be split. Finally, for the top model seen in the first row, `mtry=1`, indicating that only 1 predictor should be randomly selected at each split. 
+
+Table 26 illustrates the contribution metrics for the different variables for the boosted tree model.
+
+::: {.center-div}
+
+::: {.kable-wrapper}
+
+[Table 26: Feature Contribution Metrics for the Boosted Tree Model]{.figure-title}
+
+
+```{r question-4b-ii, echo = FALSE}
+# Extract the engine (XGBoost model object)
+boost_model <- extract_fit_engine(final_boost_fit)
+
+# Get the training data feature names used by the model
+feature_names <- boost_model$feature_names
+
+# Compute importance
+boost_importance <- xgb.importance(feature_names = feature_names, model = boost_model)
+
+# Display the table
+kable(boost_importance) |> kable_styling(full_width = FALSE)
+```
+:::
+
+:::
+
+
+As can be seen in Table 26, `linearity` is the most important feature in the boosted tree model, contributing to nearly 38.0% of the overall gain, followed by `covariate2` which also contributes 30.4% of the overall gain. In the boosted tree model, we continue to see that `entropy` contributes very little, and `x_acf1` and `covariate1` negligibly improve the model's performance. Although all variables is frequently used to split, there is a clear pattern on which variables improve the model the most, which has been somewhat consistent throughout this analysis.
+
+Overall, the hyperparameters that will lead to the best boosted tree model can be seen in Table 27.
+
+::: {.center-div}
+
+::: {.kable-wrapper}
+
+[Table 27: Best Tuned Boosted Tree Parameters Model Based on ROC AUC]{.figure-title}
+
+```{r question-4b-iii, echo = FALSE}
+kable(boost_best |> select(-.config))  |> kable_styling(full_width = FALSE)
+```
+
+:::
+
+:::
+
+Table 28 and Table 29 both give us insights into how well the boosted
+tree performed on the training data set and the testing data set,
+respectively.
+
+::: columns
+::: column
+
+[Table 28: Confusion Matrix on Training Data for Boosted Tree]{.figure-title}
+
+::: {.center-div}
+
+::: {.kable-wrapper}
+
+```{r question-4b-iv, echo = FALSE}
+# Print confusion matrix
+kable(boost_cm_train) |> kable_styling(full_width = FALSE)
+```
+:::
+
+:::
+
+:::
+
+::: column
+
+
+[Table 29: Confusion Matrix on Testing Data for Boosted Tree]{.figure-title}
+
+::: {.center-div}
+
+::: {.kable-wrapper}
+```{r question-4b-v, echo = FALSE}
+# Print confusion matrix
+kable(boost_cm_test) |> kable_styling(full_width = FALSE)
+```
+:::
+:::
+
+:::
+:::
+As can be seen in Table 28, the boosted tree ending up correctly predicting birdsongs 97.3% of the time and finance 95.4% of the time in the training set - which is higher than the Random Forest (potentially indicating that it may be starting to overfit as it approaches 100%). When looking at the test set confusion matrix seen in Table 29, the boosted tree correctly predicting birdsongs 94.4% of the time and finance 86.0% of the time. Overall, this is quite a good result and the confusion matrix on the test set is looking quite good compared to the other models. Note that throughout, and even for the boosted tree model, the models incorrectly predict birdsong for time series that are finance more often than vice versa. 
+ 
+
+::: columns
+::: column
+
+::: {.justified}
+On the training set:
+:::
+
+$$accuracy = `r round(boost_accuracy_train,4)*100`\%$$
+$$balanced \ accuracy = `r round(boost_bal_accuracy_train,4)*100`\%$$ 
+
+:::
+
+::: column
+
+::: {.justified}
+On the test set:
+:::
+
+$$accuracy = `r round(boost_accuracy_test,4)*100`\%$$
+$$balanced \ accuracy = `r round(boost_bal_accuracy_test,4)*100`\%$$
+
+:::
+:::
+
+As can be seen, regarding the training set, the accuracy and balanced accuracy are very high and on the test set it continued to still perform quite well, with an accuracy of 90.1% and a balanced accuracy of 90.2%. This boosted tree model has a higher accuracy and balanced accuracy on the test set than the random forest, tuned decision tree, “bad” decision tree, LDA or Logistic Regression model.
+
+
+To better understand why the boosted tree model is incorrectly predicting the type on the test set, Table 30 illustrates the probability the boosted tree model had for each type and the vote difference, arranged in order from the smallest vote to largest.
+
+::: {.center-div}
+
+[Table 30: Boosted Tree Predictions Sorted by Vote Difference]{.figure-title}
+
+::: {.kable-wrapper}
+
+```{r question-4b-vi, echo = FALSE}
+# Add vote_diff and predicted class
+boost_vote_diff_df <- boost_preds_probs |>
+  mutate(
+    vote_diff = abs(.pred_birdsongs - .pred_finance),
+    predicted_class = ifelse(.pred_birdsongs > .pred_finance, "birdsongs", "finance"),
+    actual = financebirds_test$type
+  ) |>
+  select(.pred_birdsongs, .pred_finance, vote_diff, predicted_class, actual) |>
+  arrange(vote_diff)
+
+# Display the results
+kable(head(boost_vote_diff_df, 20))  |> kable_styling(full_width = FALSE)
+```
+:::
+
+:::
+
+
+Comparing Table 30 to that of the random forest model (Table 24), we see that there are now 11 observations that the boosted tree struggles to clearly distinguish (`vote_diff` < 20%) - more than the random forest. Additionally, within the top 20 observations with the smallest vote difference shown, there are 11 incorrect predictions. Given that in total there are 29 incorrect predictions, and only 11 seen in this small set, it indicates that the variables may not be clearly distinguishable enough to achieve much higher accuracy than what is achieved and explains why there still seems to be errors in the boosted tree model. Additionally, from Table 30 we can see from this that the boosted tree model is much less confident in it's predictions than the random forest model having more closer prediction probabilities than the random forest model.
+
+##### c)
+
+```{r question-4c, echo = FALSE}
+# Add model labels
+rf_roc_df <- rf_roc |> as.data.frame() |> mutate(Model = "Random Forest")
+boost_roc_df <- boost_roc |> as.data.frame() |> mutate(Model = "Boosted Tree")
+
+# Combine into one data frame
+combined_roc_df <- bind_rows(rf_roc_df, boost_roc_df)
+
+# Plot ROC curves
+boost_rf_roc_plot <- ggplot(combined_roc_df, aes(x = 1 - specificity, y = sensitivity, color = Model)) +
+  geom_line(size = 1) +
+  labs(
+    x = "False Positive Rate (1 - Specificity)",
+    y = "True Positive Rate (Sensitivity)",
+    color = "Model"
+  ) +
+  theme_minimal()
+
+# Create AUC summary table
+boost_rf_auc_df <- tibble(
+  Model = c("Random Forest", "Boosted Tree"),
+  AUC = c(rf_auc, boost_auc)
+)
+```
+
+Figure 14 illustrates the ROC Curve for the random forest model and the boosted tree model.
+
+::: {.center-div}
+
+[Figure 14: ROC Curves for Random Forest vs Boosted Tree Model]{ .figure-title}
+```{r question-4c-i, echo = FALSE}
+boost_rf_roc_plot
+```
+:::
+
+As can be seen in Figure 14, the ROC for both models are similar with the boosted tree ROC curve seeming to perform better better. It is good to confirm this by checking the area under each curve - with a summary provided in Table 31.
+
+
+::: {.center-div}
+
+[Table 31: Area Under Curve (AUC) for the Random Forest and Boosted Tree Models]{.figure-title}
+
+::: {.kable-wrapper}
+```{r question-4c-ii, echo = FALSE}
+kable(boost_rf_auc_df) |> kable_styling(full_width = FALSE)
+```
+:::
+
+:::
+
+Regarding the ROC Curve and the AUC, both of these models perform very well. Compared to the tuned decision tree, "bad" decision tree, LDA and Logistic Regression model's ROC Curve and AUC, both of these perform better. Out of the two, the boosted tree model seems to be better than random forest model according to ROC Curve and AUC. Consequently, as it has the best ROC Curve and AUC, the boosted tree model is the current best model for distinguishing between financial time series and audio tracks of birds.
+
+##### d)
+
+[Choice of Best Model]{.underline}
+
+Overall, six different models were analysed and investigated including: Logistic Regression, LDA, "bad" decision tree, tuned decision tree, random forest and boosted tree model. Out of these six models, the models with the best ROC Curve, sorted from highest AUC to lowest, are boosted tree model, random forest, tuned decision tree, LDA, Logistic Regression, "bad" decision tree model. The LDA and Logistic Regression model are close to one another, while the tuned decision tree and the random forest are also reasonably close to one another. It makes sense though that the boosted tree model achieved a higher ROC, as each tree learns and improves on the mistakes of previous ones, unlike random forests that builds an ensemble of independent trees. Hence, speaking from a ROC Curve only, I would have to say that the best model choice is the boosted tree model - with the overall largest AUC OF 96.7%. 
+
+However, if we wanted to consider other factors such as model complexity and speed of training, I would argue that the tuned decision tree model is the most appropriate. The tuned decision tree model, although achieving third highest AUC, was able to be very quickly trained while still maintaining a high AUC of 94.6%. Both the random forest and the boosted tree models took much longer, and for a trade of of up to 2.1% of the AUC for speed compared to the boosted tree model and 0.4% of the AUC compared to the random forest model, it may be worth it.
+
+Therefore, if I wanted a quick and rather simple to train model that still has high accuracy, I would choose the tuned decision tree model. But if time did not matter and I simply wanted to most accurate model, then I would choose the boosted tree model, even considering tuning further hyperparameters (which would drastically increase training time even more but may result in a slight gain in accuracy). 
+
+
+[How the Time Series Typically Differ]{.underline}
+
+Overall, it was found that the time series for financial data and birdsongs typically differed on two main variables. From the "bad" decision tree, tuned decision tree, random forest and boosted tree models, `linearity` and `covariate2` were the two most significant variables in helping distinguish between birdsongs and financial time series. Even in the LDA and Logistic Regression models, these two variables had some significance. Additionally, it was learnt that `covariate1` is not useful in distinguishing between the two types of data, indicating that it could probably be neglected in future. 
+
+Overall, no matter how good they are, there are still observations that the model cannot appropriately distinguish - due to their similarity - making it hard for a human to even correctly predict it. Overall, we saw that we are more likely to incorrectly finance as a birdsong than vice versa, so keeping this in mind when drawing on conclusions from any model is important.  
+
+## References
+
+Arnold, J. B. (2012). ggthemes: Extra Themes, Scales and Geoms for 'ggplot2'. R package version 5.1.0.
+Available at: https://CRAN.R-project.org/package=ggthemes
+
+Canty, A., & Ripley, B. D. (2021). boot: Bootstrap R (S-Plus) Functions.
+Available at: https://CRAN.R-project.org/package=boot
+
+Chen, T., He, T., Benesty, M., Khotilovich, V., Tang, Y., Cho, H., ... & Yuan, J. (2025). xgboost: Extreme Gradient Boosting. R package version 3.0.0.1.
+Available at: https://github.com/dmlc/xgboost
+
+Cheng, J., Xie, Y., Wickham, H., Chang, W., & McPherson, J. (2023). crosstalk: Inter-Widget Interactivity for HTML Widgets.
+Available at: https://CRAN.R-project.org/package=crosstalk
+
+Garnier, S., Ross, N., Rudis, B., Sciaini, M., Camargo, A. P., & Scherer, C. (2023). viridisLite: Colorblind-Friendly Color Maps (Lite Version). R package version 0.4.2.
+Available at: https://CRAN.R-project.org/package=viridisLite
+
+Hart, C., & Wang, E. (2022). detourr: Portable and Performant Tour Animations.
+Available at: https://CRAN.R-project.org/package=detourr
+
+Hvitfeldt, E., Silge, J., Kuhn, M., & Vaughan, D. (2023). discrim: Model Wrappers for Discriminant Analysis.
+Available at: https://CRAN.R-project.org/package=discrim
+
+Kassambara, A. (2023). ggpubr: 'ggplot2' Based Publication Ready Plots. R package version 0.6.0.
+Available at: https://rpkgs.datanovia.com/ggpubr/
+
+Kuhn, M., Wickham, H., & Weston, S. (2020). Tidymodels: A collection of packages for modeling and machine learning using tidyverse principles.
+Available at: https://www.tidymodels.org
+
+Liaw, A., & Wiener, M. (2002). Classification and Regression by randomForest. R News, 2(3), 18–22.
+Available at: https://CRAN.R-project.org/package=randomForest
+
+Milborrow, S. (2024). rpart.plot: Plot 'rpart' Models: An Enhanced Version of 'plot.rpart'. R package version 3.1.2.
+Available at: https://CRAN.R-project.org/package=rpart.plot
+
+Pedersen, T. L. (2025). patchwork: The Composer of Plots. R package version 1.3.0.9000.
+Available at: https://patchwork.data-imaginist.com/
+
+Schloerke, B., Cook, D., Larmarange, J., Briatte, F., Marbach, M., Thoen, E., Elberg, A., & Crowley, J. (2024). GGally: Extension to 'ggplot2'. R package version 2.2.1.
+Available at: https://CRAN.R-project.org/package=GGally
+
+Sievert, C. (2020). Interactive Web-Based Data Visualization with R, plotly, and shiny. Chapman and Hall/CRC.
+Available at: https://plotly-r.com
+
+Wickham, H., Cook, D., Hofmann, H., & Buja, A. (2011). tourr: An R Package for Exploring Multivariate Data with Projections. Journal of Statistical Software, 40(2), 1–18.
+Available at: http://www.jstatsoft.org/v40/i02/
+
+Wickham, H., François, R., Henry, L., & Müller, K. (2019). Welcome to the tidyverse. Journal of Open Source Software, 4(43), 1686.
+DOI: https://doi.org/10.21105/joss.01686
+
+Wickham, H., Hester, J., & Bryan, J. (2024). readr: Read Rectangular Text Data. R package version 2.1.5.
+Available at: https://readr.tidyverse.org
+
+Xie, Y. (2025). knitr: A General-Purpose Package for Dynamic Report Generation in R. R package version 1.50.
+Available at: https://yihui.org/knitr/
+
+Zhu, H. (2024). kableExtra: Construct Complex Table with 'kable' and Pipe Syntax.
+Available at: https://CRAN.R-project.org/package=kableExtra
+
+
+
