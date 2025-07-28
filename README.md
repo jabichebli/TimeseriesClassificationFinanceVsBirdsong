@@ -6,7 +6,7 @@ Created by **Jason Abi Chebli**
 <div style="text-align: justify;">This project builds and compares classification models to distinguish between financial time series and birdsong audio signals, based on extracted time series features. The analysis evaluates linear and non-linear classifiers using the <code>tidymodels</code> framework in R, and includes tuning, ROC-based comparisons, and insight into feature relevance for the two classes.</div>
 
 ## Demo  
-You can explore the full classification analysis [here](https://jabichebli.github.io/TimeseriesClassificationFinanceVsBirdsong/index.html).
+You can explore the full classification analysis [here](https://jabichebli.github.io/TimeseriesClassificationFinanceVsBirdsong/report/index.html).
 
 ## Dataset  
 - File: `finance_and_birds.csv`  
@@ -49,7 +49,7 @@ You can explore the full classification analysis [here](https://jabichebli.githu
 
 ## Files  
 >[TimeseriesClassificationFinanceVsBirdsong.qmd](FinanceBirdsClassification.qmd) — Quarto file containing full classification analysis and comparisons  
->[index.html](index.html) — Rendered output for easy viewing  
+>[index.html](report/index.html) — Rendered output for easy viewing  
 >[finance_and_birds.csv](finance_and_birds.csv) — Feature dataset derived from financial time series and birdsong recordings
 
 ## Visual Highlights  
