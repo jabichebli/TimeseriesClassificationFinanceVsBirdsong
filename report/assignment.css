@@ -1,0 +1,72 @@
+@import url('https://fonts.googleapis.com/css2?family=Karla:ital,wght@0,400;0,700;1,400;1,700&family=PT+Sans+Narrow:wght@400;700&display=swap');
+
+* {
+  font-family: 'Karla', sans-serif;
+  font-weight: 400;
+}
+
+h1, h2, h3 {
+  font-family: "PT Sans Narrow", sans-serif;
+  font-weight: 700;
+  color: #027EB6;
+}
+
+h4, h5, h6 {
+  font-size: 14pt;
+  font-weight: 700;
+}
+
+h1 {
+    color: #006DAE;
+}
+
+a {
+  color: #C8008F;
+}
+
+
+p {
+  text-align: justify;
+}
+
+.column .justified p {
+  text-align: justify;
+}
+
+.figure-title {
+  font-weight: bold;
+  font-size: 11pt;
+}
+
+.column p {
+  margin-bottom: 0em;
+  text-align: center;
+}
+
+.center-div p {
+  margin-bottom: 0em;
+  text-align: center;
+}
+
+.js-plotly-plot .plotly, .js-plotly-plot .plotly div {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+code {
+  text-align: center;
+}
+
+code.sourceCode.r {
+  text-align: left;
+}
+
+.center-div {
+  text-align: center; 
+}
+
+.kable-wrapper {
+  display: inline-block;
+  width: auto;
+}
